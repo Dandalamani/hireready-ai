@@ -52,7 +52,7 @@ const navItems = [
 ];
 
 const Sidebar = () => {
-  const { user, logout } = useAuth();
+  const { logout } = useAuth();
   const location = useLocation();
 
   return (

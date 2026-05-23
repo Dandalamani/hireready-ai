@@ -9,7 +9,6 @@ const Report = () => {
   const [report, setReport] = useState(null);
   const [loading, setLoading] = useState(true);
   const savedRef = useRef(false);
-  const sessionKeyRef = useRef(`session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`);
 
 useEffect(() => {
   if (!state?.exchanges?.length) {

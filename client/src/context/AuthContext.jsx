@@ -8,7 +8,7 @@ export const AuthProvider = ({ children }) => {
   const [token, setToken] = useState(localStorage.getItem('token') || null);
   const [loading, setLoading] = useState(true);
 
-  axios.defaults.baseURL = 'http://localhost:5000';
+  axios.defaults.baseURL = process.env.REACT_APP_API_URL || 'http://localhost:5000';
 
   const logout = useCallback(() => {
     localStorage.removeItem('token');

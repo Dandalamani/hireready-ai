@@ -78,12 +78,11 @@ const Alert = ({ type, message, onClose }) => {
 };
 
 const Settings = () => {
-  const { user, logout, updateUser } = useAuth();
+  const { logout, updateUser } = useAuth();
   const navigate = useNavigate();
   const [activeTab, setActiveTab] = useState('profile');
   const [profileData, setProfileData] = useState(null);
   const [loadingProfile, setLoadingProfile] = useState(true);
-  const fileInputRef = useRef(null);
 
   // Profile form
   const [name, setName] = useState('');

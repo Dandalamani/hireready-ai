@@ -136,20 +136,7 @@ const Interview = () => {
   }, [role, mode, state]);
 
   // ── Update score after report ──
-  const updateSessionScore = useCallback(async (score, confidence, pacing) => {
-    if (!score) return;
-    try {
-      const res = await axios.patch('/api/sessions/update-score', {
-        session_key: sessionKeyRef.current,
-        score,
-        confidence: confidence || null,
-        pacing: pacing || null,
-      });
-      console.log('✅ Score updated:', score, '| Rows:', res.data.affectedRows);
-    } catch (err) {
-      console.error('❌ Score update failed:', err.message);
-    }
-  }, []);
+  
 
   const speakQuestion = useCallback((question) => {
     setIsSpeaking(true);
