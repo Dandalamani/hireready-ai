@@ -1,21 +1,21 @@
 const { Pool } = require('pg');
 require('dotenv').config();
 
-const isProduction = process.env.NODE_ENV === 'production';
+const isProduction = !!process.env.DATABASE_URL;
 
-let pool;
+let pgPool = null;
+let mysqlPool = null;
 
-if (isProduction || process.env.DATABASE_URL) {
-  // Neon PostgreSQL (production)
-  pool = new Pool({
+if (isProduction) {
+  pgPool = new Pool({
     connectionString: process.env.DATABASE_URL,
     ssl: { rejectUnauthorized: false },
+    max: 10,
   });
-  console.log('✅ Using Neon PostgreSQL');
+  console.log('✅ Connected to Neon PostgreSQL');
 } else {
-  // Local MySQL (development)
   const mysql = require('mysql2/promise');
-  pool = mysql.createPool({
+  mysqlPool = mysql.createPool({
     host: process.env.DB_HOST,
     user: process.env.DB_USER,
     password: process.env.DB_PASSWORD,
@@ -23,53 +23,81 @@ if (isProduction || process.env.DATABASE_URL) {
     waitForConnections: true,
     connectionLimit: 10,
   });
-  console.log('✅ Using local MySQL');
+  console.log('✅ Connected to local MySQL');
 }
 
-// Unified query interface
+// Convert MySQL ? placeholders to PostgreSQL $1, $2...
+const convertQuery = (sql) => {
+  let count = 0;
+  return sql
+    .replace(/\?/g, () => `$${++count}`)
+    .replace(/`/g, '"');
+};
+
+// Main query function
 const query = async (sql, params = []) => {
-  if (process.env.DATABASE_URL || isProduction) {
-    // PostgreSQL — convert ? to $1, $2...
-    let pgSQL = sql;
-    let paramIndex = 1;
-    pgSQL = pgSQL.replace(/\?/g, () => `$${paramIndex++}`);
-
-    // Convert MySQL backticks to PostgreSQL double quotes
-    pgSQL = pgSQL.replace(/`/g, '"');
-
-    const result = await pool.query(pgSQL, params);
-    return [result.rows, result.fields];
+  if (isProduction) {
+    const converted = convertQuery(sql);
+    try {
+      const result = await pgPool.query(converted, params);
+      return [result.rows, result.fields];
+    } catch (err) {
+      console.error('❌ PG Query error:', err.message);
+      console.error('SQL:', converted);
+      console.error('Params:', params);
+      throw err;
+    }
   } else {
-    // MySQL
-    return pool.query(sql, params);
+    return mysqlPool.query(sql, params);
   }
 };
 
-// getConnection for transactions
+// Transaction connection
 const getConnection = async () => {
-  if (process.env.DATABASE_URL || isProduction) {
-    // PostgreSQL transaction wrapper
-    const client = await pool.connect();
+  if (isProduction) {
+    const client = await pgPool.connect();
+    let paramCount = 0;
+
     return {
       query: async (sql, params = []) => {
-        let pgSQL = sql.replace(/\?/g, (_, i) => {
-          let idx = 0;
-          sql.slice(0, sql.indexOf('?')).replace(/\?/g, () => { idx++; return '?'; });
-          return `$${++pgSQL._paramCount}`;
-        });
-        pgSQL._paramCount = 0;
-        let count = 0;
-        const converted = sql.replace(/\?/g, () => `$${++count}`).replace(/`/g, '"');
-        return client.query(converted, params).then(r => [r.rows, r.fields]);
+        paramCount = 0;
+        const converted = sql
+          .replace(/\?/g, () => `$${++paramCount}`)
+          .replace(/`/g, '"');
+        try {
+          const result = await client.query(converted, params);
+          return [result.rows, result.fields];
+        } catch (err) {
+          console.error('❌ PG Transaction query error:', err.message);
+          console.error('SQL:', converted);
+          throw err;
+        }
       },
-      beginTransaction: () => client.query('BEGIN'),
-      commit: () => client.query('COMMIT'),
-      rollback: () => client.query('ROLLBACK'),
+      beginTransaction: async () => {
+        paramCount = 0;
+        await client.query('BEGIN');
+      },
+      commit: async () => client.query('COMMIT'),
+      rollback: async () => client.query('ROLLBACK'),
       release: () => client.release(),
     };
   } else {
-    return pool.getConnection();
+    return mysqlPool.getConnection();
   }
 };
+
+// Test connection on startup
+const testConnection = async () => {
+  try {
+    if (isProduction) {
+      await pgPool.query('SELECT 1');
+      console.log('✅ Neon DB connection verified');
+    }
+  } catch (err) {
+    console.error('❌ DB connection failed:', err.message);
+  }
+};
+
+testConnection();
 
 module.exports = { query, getConnection };
