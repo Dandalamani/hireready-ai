@@ -5,7 +5,6 @@ const Groq = require('groq-sdk');
 
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
-// Parse GitHub URL to get owner/repo
 const parseGitHubUrl = (url) => {
   try {
     const cleaned = url.trim().replace(/\/$/, '');
@@ -17,19 +16,38 @@ const parseGitHubUrl = (url) => {
   }
 };
 
-// Fetch repo info from GitHub public API
+const githubFetch = async (url) => {
+  const headers = {
+    'User-Agent': 'HireReady-AI-App',
+    'Accept': 'application/vnd.github.v3+json',
+  };
+  if (process.env.GITHUB_TOKEN) {
+    headers['Authorization'] = `token ${process.env.GITHUB_TOKEN}`;
+  }
+  const res = await fetch(url, { headers });
+  return res;
+};
+
 const fetchRepoData = async (owner, repo) => {
-  const headers = { 'User-Agent': 'HireReady-AI' };
+  const repoRes = await githubFetch(
+    `https://api.github.com/repos/${owner}/${repo}`
+  );
 
-  const [repoRes, languagesRes, commitsRes] = await Promise.all([
-    fetch(`https://api.github.com/repos/${owner}/${repo}`, { headers }),
-    fetch(`https://api.github.com/repos/${owner}/${repo}/languages`, { headers }),
-    fetch(`https://api.github.com/repos/${owner}/${repo}/commits?per_page=10`, { headers }),
-  ]);
-
-  if (!repoRes.ok) throw new Error('Repository not found or is private');
+  if (!repoRes.ok) {
+    const errData = await repoRes.json().catch(() => ({}));
+    console.error('GitHub API error:', repoRes.status, errData.message);
+    if (repoRes.status === 404) throw new Error('Repository not found or is private');
+    if (repoRes.status === 403) throw new Error('GitHub API rate limit exceeded. Try again in a minute.');
+    throw new Error(`GitHub API error: ${errData.message || repoRes.status}`);
+  }
 
   const repoData = await repoRes.json();
+
+  const [languagesRes, commitsRes] = await Promise.all([
+    githubFetch(`https://api.github.com/repos/${owner}/${repo}/languages`),
+    githubFetch(`https://api.github.com/repos/${owner}/${repo}/commits?per_page=10`),
+  ]);
+
   const languages = languagesRes.ok ? await languagesRes.json() : {};
   const commits = commitsRes.ok ? await commitsRes.json() : [];
 
@@ -40,33 +58,35 @@ const fetchRepoData = async (owner, repo) => {
     languages: Object.keys(languages),
     stars: repoData.stargazers_count,
     forks: repoData.forks_count,
-    size: repoData.size,
     topics: repoData.topics || [],
-    defaultBranch: repoData.default_branch,
     isPublic: !repoData.private,
-    commitCount: repoData.size,
-    recentCommits: commits.slice(0, 5).map(c => ({
-      message: c.commit?.message?.split('\n')[0] || '',
-      date: c.commit?.author?.date || '',
-    })),
-    createdAt: repoData.created_at,
-    updatedAt: repoData.updated_at,
+    recentCommits: Array.isArray(commits)
+      ? commits.slice(0, 5).map(c => ({
+          message: c.commit?.message?.split('\n')[0] || '',
+          date: c.commit?.author?.date || '',
+        }))
+      : [],
     openIssues: repoData.open_issues_count,
+    updatedAt: repoData.updated_at,
   };
 };
 
-// Analyze repo and generate interview questions
 router.post('/analyze', protect, async (req, res) => {
   const { url, difficulty } = req.body;
   if (!url) return res.status(400).json({ message: 'GitHub URL required' });
 
   const parsed = parseGitHubUrl(url);
-  if (!parsed) return res.status(400).json({ message: 'Invalid GitHub URL' });
+  if (!parsed) {
+    return res.status(400).json({
+      message: 'Invalid GitHub URL. Use format: https://github.com/username/repository'
+    });
+  }
+
+  console.log(`🔍 Analyzing repo: ${parsed.owner}/${parsed.repo}`);
 
   try {
     const repoData = await fetchRepoData(parsed.owner, parsed.repo);
 
-    // Generate AI questions based on repo
     const completion = await groq.chat.completions.create({
       model: 'llama-3.3-70b-versatile',
       messages: [
@@ -74,16 +94,9 @@ router.post('/analyze', protect, async (req, res) => {
           role: 'system',
           content: `You are Coach Roberts, an expert technical interview coach.
 Analyze this GitHub repository and generate 5 targeted interview questions.
-Return ONLY a valid JSON array of objects with this structure:
-[
-  {
-    "question": "<specific interview question about this repo>",
-    "category": "<Architecture|Code Quality|Problem Solving|Technology Choice|Performance>",
-    "difficulty": "<Basic|Intermediate|Advanced>"
-  }
-]
-Make questions specific to this repo — mention actual technologies, patterns, or decisions visible from the repo data.
-Return ONLY the JSON array, nothing else.`,
+Return ONLY a valid JSON array. No markdown, no backticks.
+Format: [{"question":"...","category":"Architecture","difficulty":"Intermediate"}]
+Categories: Architecture, Code Quality, Problem Solving, Technology Choice, Performance`,
         },
         {
           role: 'user',
@@ -91,11 +104,12 @@ Return ONLY the JSON array, nothing else.`,
 Description: ${repoData.description}
 Primary Language: ${repoData.language}
 All Languages: ${repoData.languages.join(', ')}
-Topics/Tags: ${repoData.topics.join(', ')}
+Topics: ${repoData.topics.join(', ')}
 Stars: ${repoData.stars}, Forks: ${repoData.forks}
-Open Issues: ${repoData.openIssues}
 Recent Commits: ${repoData.recentCommits.map(c => c.message).join(' | ')}
-Difficulty level requested: ${difficulty || 'Intermediate'}`,
+Difficulty: ${difficulty || 'Intermediate'}
+
+Generate 5 specific interview questions about this repository.`,
         },
       ],
       max_tokens: 800,
@@ -103,46 +117,45 @@ Difficulty level requested: ${difficulty || 'Intermediate'}`,
     });
 
     const raw = completion.choices[0]?.message?.content?.trim();
+    console.log('GitHub questions raw:', raw?.substring(0, 200));
+
     let questions = [];
     try {
-      questions = JSON.parse(raw);
+      let cleaned = raw
+        .replace(/```json/gi, '')
+        .replace(/```/g, '')
+        .trim();
+      const start = cleaned.indexOf('[');
+      const end = cleaned.lastIndexOf(']');
+      if (start !== -1 && end !== -1) {
+        cleaned = cleaned.substring(start, end + 1);
+      }
+      questions = JSON.parse(cleaned);
     } catch {
       questions = [
-        {
-          question: `Walk me through the architecture of ${repoData.name} and the key design decisions you made.`,
-          category: 'Architecture',
-          difficulty: difficulty || 'Intermediate',
-        },
-        {
-          question: `Why did you choose ${repoData.language} for this project? What were the tradeoffs?`,
-          category: 'Technology Choice',
-          difficulty: difficulty || 'Intermediate',
-        },
-        {
-          question: `What was the most complex problem you solved in ${repoData.name}?`,
-          category: 'Problem Solving',
-          difficulty: difficulty || 'Intermediate',
-        },
+        { question: `Walk me through the architecture of ${repoData.name}.`, category: 'Architecture', difficulty: difficulty || 'Intermediate' },
+        { question: `Why did you choose ${repoData.language} for this project?`, category: 'Technology Choice', difficulty: difficulty || 'Intermediate' },
+        { question: `What was the hardest problem you solved in ${repoData.name}?`, category: 'Problem Solving', difficulty: difficulty || 'Intermediate' },
+        { question: `How did you ensure code quality in this project?`, category: 'Code Quality', difficulty: difficulty || 'Intermediate' },
+        { question: `How would you scale ${repoData.name} to handle 10x more users?`, category: 'Performance', difficulty: difficulty || 'Intermediate' },
       ];
     }
 
     res.json({ repo: repoData, questions });
   } catch (err) {
-    console.error('GitHub analyze error:', err);
-    res.status(400).json({ message: err.message || 'Failed to analyze repository' });
+    console.error('GitHub analyze error:', err.message);
+    res.status(400).json({ message: err.message });
   }
 });
 
-// Get user's public repos (from GitHub username)
 router.get('/user-repos/:username', protect, async (req, res) => {
   try {
-    const response = await fetch(
-      `https://api.github.com/users/${req.params.username}/repos?sort=updated&per_page=6`,
-      { headers: { 'User-Agent': 'HireReady-AI' } }
+    const response = await githubFetch(
+      `https://api.github.com/users/${req.params.username}/repos?sort=updated&per_page=6`
     );
     if (!response.ok) throw new Error('User not found');
     const repos = await response.json();
-    const simplified = repos.map(r => ({
+    res.json(repos.map(r => ({
       name: r.name,
       description: r.description || '',
       language: r.language || 'Unknown',
@@ -151,9 +164,7 @@ router.get('/user-repos/:username', protect, async (req, res) => {
       url: r.html_url,
       isPublic: !r.private,
       updatedAt: r.updated_at,
-      commits: r.size,
-    }));
-    res.json(simplified);
+    })));
   } catch (err) {
     res.status(400).json({ message: err.message });
   }

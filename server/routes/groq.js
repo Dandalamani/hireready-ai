@@ -303,10 +303,39 @@ router.post('/report', protect, async (req, res) => {
     return res.status(400).json({ message: 'No exchanges provided' });
   }
 
-  console.log(`📊 Generating report: ${exchanges.length} exchanges, role: ${role}`);
+  // Check if user actually answered questions
+  const answeredExchanges = exchanges.filter(
+    e => e.answer && e.answer.trim() !== '' && e.answer !== '[No response]'
+  );
+
+  console.log(`📊 Report: ${exchanges.length} questions, ${answeredExchanges.length} answered`);
+  
+  // If no answers at all, return low score immediately
+  if (answeredExchanges.length === 0) {
+    return res.json({
+      overallScore: 10,
+      clarity: 5,
+      structure: 5,
+      tone: 10,
+      confidence: 'Low',
+      empathy: 'Inconsistent',
+      pacingWPM: 0,
+      strengths: [],
+      improvements: [
+        'Please answer the interview questions',
+        'Speak clearly into the microphone',
+        'Use the STAR method for structured answers',
+      ],
+      valueProp: 'No responses were detected in this session.',
+      executivePresence: 'Practice speaking your answers aloud clearly.',
+      nextSteps: 'Try again and make sure your microphone is working.',
+      phrasingSuggestions: [],
+      groqStatus: usageTracker.getStatus(),
+    });
+  }
 
   try {
-    const summary = exchanges
+    const summary = answeredExchanges
       .map((e, i) => `Q${i + 1}: ${e.question || 'N/A'}\nAnswer: ${e.answer || 'No answer given'}`)
       .join('\n\n');
 
@@ -357,10 +386,10 @@ Analyze the above and return the JSON report.`,
     if (parsed) {
       // Validate and ensure all fields exist with proper types
       const report = {
-        overallScore: parseInt(parsed.overallScore) || 70,
-        clarity: parseInt(parsed.clarity) || 72,
-        structure: parseInt(parsed.structure) || 70,
-        tone: parseInt(parsed.tone) || 71,
+  overallScore: parseInt(parsed.overallScore) || null,
+  clarity: parseInt(parsed.clarity) || null,
+  structure: parseInt(parsed.structure) || null,
+  tone: parseInt(parsed.tone) || null,
         confidence: parsed.confidence || 'Medium',
         empathy: parsed.empathy || 'Consistent',
         pacingWPM: parseInt(parsed.pacingWPM) || 145,
