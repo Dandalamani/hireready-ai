@@ -14,77 +14,88 @@ const checkOllama = async () => {
 
 // Store session answers as embeddings in MySQL
 const storeSessionAnswers = async (userId, sessionId, exchanges, role) => {
-  const ollamaUp = await checkOllama();
-  if (!ollamaUp) {
-    console.log('⚠️ Ollama not running — skipping RAG storage');
-    return;
-  }
-
   try {
-    console.log(`📚 Storing ${exchanges.length} answers in RAG for user ${userId}`);
+    const isPG = !!process.env.DATABASE_URL;
+    console.log(`📚 Storing ${exchanges.length} answers for user ${userId}`);
     let stored = 0;
+
+    // Try Ollama first, fall back to storing without embeddings
+    const ollamaUp = await checkOllama();
 
     for (let i = 0; i < exchanges.length; i++) {
       const ex = exchanges[i];
       if (!ex.question || !ex.answer || ex.answer === '[No response]') continue;
 
       const score = parseFloat(ex.feedback?.score) || 5;
-      const text = `Question: ${ex.question}\nAnswer: ${ex.answer}`;
 
-      const embedding = await embed(text);
-      if (!embedding) {
-        console.log(`⚠️ Skipping Q${i + 1} — embedding failed`);
-        continue;
+      let embeddingData = '[]'; // default empty embedding
+
+      if (ollamaUp) {
+        const text = `Question: ${ex.question}\nAnswer: ${ex.answer}`;
+        const embedding = await embed(text);
+        if (embedding) {
+          embeddingData = JSON.stringify(embedding);
+        }
       }
 
-      await db.query(
-        `INSERT INTO answer_embeddings 
-         (user_id, session_id, role, question, answer, score, tip, tags, embedding)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [
-          userId,
-          String(sessionId),
-          role,
-          ex.question.substring(0, 1000),
-          ex.answer.substring(0, 2000),
-          score,
-          (ex.feedback?.tip || '').substring(0, 500),
-          (ex.feedback?.tags || []).join(',').substring(0, 200),
-          JSON.stringify(embedding),
-        ]
-      );
-      stored++;
-      console.log(`  ✅ Stored Q${i + 1} (score: ${score})`);
+      const p = isPG
+        ? '$1,$2,$3,$4,$5,$6,$7,$8,$9'
+        : '?,?,?,?,?,?,?,?,?';
+
+      try {
+        await db.query(
+          `INSERT INTO answer_embeddings 
+           (user_id, session_id, role, question, answer, score, tip, tags, embedding)
+           VALUES (${p})`,
+          [
+            userId,
+            String(sessionId),
+            role,
+            ex.question.substring(0, 1000),
+            ex.answer.substring(0, 2000),
+            score,
+            (ex.feedback?.tip || '').substring(0, 500),
+            (ex.feedback?.tags || []).join(',').substring(0, 200),
+            embeddingData,
+          ]
+        );
+        stored++;
+        console.log(`  ✅ Stored Q${i + 1} (score: ${score})`);
+      } catch (insertErr) {
+        console.error(`  ❌ Failed Q${i + 1}:`, insertErr.message);
+      }
     }
 
-    console.log(`✅ RAG storage complete — ${stored}/${exchanges.length} answers stored`);
+    console.log(`✅ RAG storage complete — ${stored}/${exchanges.length} stored`);
   } catch (err) {
     console.error('❌ RAG store error:', err.message);
   }
 };
 
 // Get weak areas using cosine similarity from MySQL
+// Get weak areas - works with or without Ollama
 const getUserWeakAreas = async (userId, role, limit = 5) => {
-  const ollamaUp = await checkOllama();
-  if (!ollamaUp) return [];
-
   try {
-    // Get all answers for this user and role
+    // This works without Ollama - just fetches from MySQL/PostgreSQL
+    const isPG = !!process.env.DATABASE_URL;
+    const p1 = isPG ? '$1' : '?';
+    const p2 = isPG ? '$2' : '?';
+    const p3 = isPG ? '$3' : '?';
+
     const [rows] = await db.query(
-      `SELECT id, question, answer, score, tip, tags, embedding
+      `SELECT id, question, answer, score, tip, tags
        FROM answer_embeddings
-       WHERE user_id = ? AND role = ? AND score <= 6
+       WHERE user_id = ${p1} AND role = ${p2} AND score <= 6
        ORDER BY score ASC, created_at DESC
-       LIMIT 50`,
-      [userId, role]
+       LIMIT ${p3}`,
+      [userId, role, limit * 4]
     );
 
     if (rows.length === 0) {
-      console.log(`📭 No weak areas found for user ${userId} role ${role}`);
+      console.log(`📭 No weak areas for user ${userId} role ${role}`);
       return [];
     }
 
-    // Return top N weakest answers sorted by score
     const weakAreas = rows.slice(0, limit).map(row => ({
       question: row.question,
       answer: row.answer,

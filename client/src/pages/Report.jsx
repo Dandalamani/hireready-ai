@@ -9,6 +9,7 @@ const Report = () => {
   const [report, setReport] = useState(null);
   const [loading, setLoading] = useState(true);
   const savedRef = useRef(false);
+  const ragStoredRef = useRef(false);
 
 useEffect(() => {
   if (!state?.exchanges?.length) {
@@ -16,9 +17,12 @@ useEffect(() => {
     return;
   }
 
+  // Strict guard — only run once
+  if (savedRef.current) return;
+  savedRef.current = true;
+
   const fetchAndSave = async () => {
     try {
-      // Generate report
       const res = await axios.post('/api/groq/report', {
         role: state.role,
         exchanges: state.exchanges,
@@ -26,14 +30,12 @@ useEffect(() => {
       const reportData = res.data;
       setReport(reportData);
 
-      console.log('📊 Report generated:', {
+      console.log('📊 Report:', {
         score: reportData.overallScore,
         clarity: reportData.clarity,
-        structure: reportData.structure,
-        tone: reportData.tone,
       });
 
-      // Update the session score on existing session
+      // Update score on existing session
       if (state.session_key && reportData.overallScore) {
         try {
           const updateRes = await axios.patch('/api/sessions/update-score', {
@@ -44,11 +46,11 @@ useEffect(() => {
               ? `${reportData.pacingWPM} WPM`
               : null,
           });
-          console.log('✅ Score updated:', reportData.overallScore, '| Rows:', updateRes.data.affectedRows);
+          console.log('✅ Score updated:', reportData.overallScore,
+            '| Rows:', updateRes.data.affectedRows);
 
-          // If session wasn't found by key, save fresh
-          if (updateRes.data.affectedRows === 0 && !savedRef.current) {
-            savedRef.current = true;
+          // If not found, save fresh
+          if (updateRes.data.affectedRows === 0) {
             await axios.post('/api/sessions', {
               target_role: state.role,
               mode: state.mode || 'questions',
@@ -60,8 +62,7 @@ useEffect(() => {
                 : 'Normal',
               filler_words: 'Low',
               duration_minutes: Math.max(
-                1,
-                Math.ceil((state.exchanges?.length || 1) * 1.5)
+                1, Math.ceil((state.exchanges?.length || 1) * 1.5)
               ),
               session_key: `${state.session_key}_r`,
               exchanges: state.exchanges.map(ex => ({
@@ -71,14 +72,12 @@ useEffect(() => {
                 feedback: ex.feedback || null,
               })),
             });
-            console.log('✅ Fresh save done from Report');
+            console.log('✅ Fresh save from Report');
           }
         } catch (e) {
           console.error('Score update error:', e.message);
         }
-      } else if (!savedRef.current) {
-        // No session key — save full session from Report
-        savedRef.current = true;
+      } else {
         await axios.post('/api/sessions', {
           target_role: state.role,
           mode: state.mode || 'questions',
@@ -90,8 +89,7 @@ useEffect(() => {
             : 'Normal',
           filler_words: 'Low',
           duration_minutes: Math.max(
-            1,
-            Math.ceil((state.exchanges?.length || 1) * 1.5)
+            1, Math.ceil((state.exchanges?.length || 1) * 1.5)
           ),
           session_key: `report_${Date.now()}`,
           exchanges: state.exchanges.map(ex => ({
@@ -101,20 +99,22 @@ useEffect(() => {
             feedback: ex.feedback || null,
           })),
         });
-        console.log('✅ Session saved from Report (no key)');
+        console.log('✅ Session saved from Report');
       }
 
-      // Store answers in RAG knowledge base
-      try {
-        console.log('🧠 Storing answers in RAG...');
-        const ragRes = await axios.post('/api/rag/store-session', {
-          sessionId: state.session_key || `session_${Date.now()}`,
-          exchanges: state.exchanges,
-          role: state.role,
-        });
-        console.log('✅ RAG storage:', ragRes.data);
-      } catch (ragErr) {
-        console.log('⚠️ RAG storage skipped:', ragErr.message);
+      // Store in RAG — strict single run
+      if (!ragStoredRef.current) {
+        ragStoredRef.current = true;
+        try {
+          await axios.post('/api/rag/store-session', {
+            sessionId: state.session_key || `session_${Date.now()}`,
+            exchanges: state.exchanges,
+            role: state.role,
+          });
+          console.log('✅ RAG stored');
+        } catch (ragErr) {
+          console.log('⚠️ RAG skipped:', ragErr.message);
+        }
       }
 
     } catch (err) {
@@ -125,7 +125,7 @@ useEffect(() => {
   };
 
   fetchAndSave();
-}, []);// eslint-disable-line
+}, []); // eslint-disable-line
 
   if (loading) return (
     <div className="flex h-screen bg-slate-50 overflow-hidden">
