@@ -57,10 +57,10 @@ router.post('/', protect, async (req, res) => {
     duration_minutes, exchanges, session_key
   } = req.body;
 
-  console.log(`💾 Save session: user=${req.user.id} role=${target_role} score=${score} exchanges=${exchanges?.length} key=${session_key}`);
+  console.log(`💾 Save: user=${req.user.id} role=${target_role} score=${score} key=${session_key}`);
 
   if (!target_role) {
-    return res.status(400).json({ message: 'target_role is required' });
+    return res.status(400).json({ message: 'target_role required' });
   }
 
   // Sanitize confidence
@@ -80,47 +80,59 @@ router.post('/', protect, async (req, res) => {
     }
   }
 
+  // Check duplicate BEFORE transaction
+  if (session_key) {
+    try {
+      const p1 = isPG ? '$1' : '?';
+      const p2 = isPG ? '$2' : '?';
+      const [existing] = await db.query(
+        `SELECT id, score FROM interview_sessions 
+         WHERE session_key = ${p1} AND user_id = ${p2}`,
+        [session_key, req.user.id]
+      );
+
+      if (existing.length > 0) {
+        console.log(`⚠️ Duplicate blocked: key=${session_key} existing_id=${existing[0].id}`);
+
+        // Update score if we have one and existing doesn't
+        if (score && !existing[0].score) {
+          const p3 = isPG ? '$1' : '?';
+          const p4 = isPG ? '$2' : '?';
+          const p5 = isPG ? '$3' : '?';
+          await db.query(
+            `UPDATE interview_sessions SET score=${p3}, confidence=${p4}
+             WHERE id=${p5}`,
+            [score, sanitizedConfidence, existing[0].id]
+          );
+          console.log(`✅ Updated score on existing: ${score}`);
+        }
+
+        return res.status(200).json({
+          id: existing[0].id,
+          duplicate: true,
+          message: 'Session already exists',
+        });
+      }
+    } catch (checkErr) {
+      console.error('Duplicate check error:', checkErr.message);
+    }
+  }
+
   const conn = await db.getConnection();
   try {
     await conn.beginTransaction();
 
-    // Check duplicate session_key
-    if (session_key) {
-      const p = isPG ? '$1' : '?';
-      const p2 = isPG ? '$2' : '?';
-      const [existing] = await conn.query(
-        `SELECT id, score FROM interview_sessions WHERE user_id = ${p} AND session_key = ${p2}`,
-        [req.user.id, session_key]
-      );
-      if (existing.length > 0) {
-        console.log(`⚠️ Duplicate key: ${session_key}`);
-        if (score !== null && score !== undefined) {
-          const p3 = isPG ? '$1' : '?';
-          const p4 = isPG ? '$2' : '?';
-          const p5 = isPG ? '$3' : '?';
-          const p6 = isPG ? '$4' : '?';
-          const p7 = isPG ? '$5' : '?';
-          await conn.query(
-            `UPDATE interview_sessions 
-             SET score=${p3}, confidence=${p4}, pacing=${p5}, filler_words=${p6}
-             WHERE id=${p7}`,
-            [score, sanitizedConfidence, pacing, filler_words || 'Low', existing[0].id]
-          );
-        }
-        await conn.commit();
-        conn.release();
-        return res.status(200).json({ id: existing[0].id, duplicate: true });
-      }
-    }
-
-    // Insert session
     let sessionId;
     if (isPG) {
       const [rows] = await conn.query(
-        `INSERT INTO interview_sessions 
+        `INSERT INTO interview_sessions
          (user_id, target_role, mode, difficulty, score, confidence,
           pacing, filler_words, duration_minutes, session_key)
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+         ON CONFLICT (session_key) DO UPDATE
+         SET score = COALESCE(EXCLUDED.score, interview_sessions.score),
+             confidence = COALESCE(EXCLUDED.confidence, interview_sessions.confidence),
+             pacing = COALESCE(EXCLUDED.pacing, interview_sessions.pacing)
          RETURNING id`,
         [
           req.user.id,
@@ -138,10 +150,13 @@ router.post('/', protect, async (req, res) => {
       sessionId = rows[0].id;
     } else {
       const [result] = await conn.query(
-        `INSERT INTO interview_sessions 
+        `INSERT INTO interview_sessions
          (user_id, target_role, mode, difficulty, score, confidence,
           pacing, filler_words, duration_minutes, session_key)
-         VALUES (?,?,?,?,?,?,?,?,?,?)`,
+         VALUES (?,?,?,?,?,?,?,?,?,?)
+         ON DUPLICATE KEY UPDATE
+         score = COALESCE(VALUES(score), score),
+         confidence = COALESCE(VALUES(confidence), confidence)`,
         [
           req.user.id,
           target_role || 'software-engineer',
@@ -155,58 +170,73 @@ router.post('/', protect, async (req, res) => {
           session_key || null,
         ]
       );
-      sessionId = result.insertId;
+      sessionId = result.insertId || result.id;
     }
 
-    console.log(`✅ Session inserted ID: ${sessionId}`);
+    console.log(`✅ Session upserted ID: ${sessionId}`);
 
-    // Insert exchanges
+    // Only insert questions if this is a new session
     if (exchanges && exchanges.length > 0) {
-      for (let i = 0; i < exchanges.length; i++) {
-        const ex = exchanges[i];
-        if (!ex.question) continue;
+      // Check if questions already exist
+      const p = isPG ? '$1' : '?';
+      const [existingQ] = await conn.query(
+        `SELECT COUNT(*) as cnt FROM questions WHERE session_id = ${p}`,
+        [sessionId]
+      );
+      const qCount = parseInt(existingQ[0]?.cnt || existingQ[0]?.count || 0);
 
-        let questionId;
-        if (isPG) {
-          const [qRows] = await conn.query(
-            `INSERT INTO questions (session_id, question_text, question_order, category)
-             VALUES ($1,$2,$3,$4) RETURNING id`,
-            [sessionId, ex.question, i + 1, ex.category || 'general']
-          );
-          questionId = qRows[0].id;
-        } else {
-          const [qResult] = await conn.query(
-            `INSERT INTO questions (session_id, question_text, question_order, category)
-             VALUES (?,?,?,?)`,
-            [sessionId, ex.question, i + 1, ex.category || 'general']
-          );
-          questionId = qResult.insertId;
-        }
+      if (qCount === 0) {
+        for (let i = 0; i < exchanges.length; i++) {
+          const ex = exchanges[i];
+          if (!ex.question) continue;
 
-        if (ex.answer) {
-          const p = isPG
-            ? '$1,$2,$3,$4,$5'
-            : '?,?,?,?,?';
-          await conn.query(
-            `INSERT INTO responses (question_id, session_id, response_text, ai_feedback, score)
-             VALUES (${p})`,
-            [
-              questionId,
-              sessionId,
-              ex.answer || '',
-              ex.feedback ? JSON.stringify(ex.feedback) : null,
-              ex.feedback?.score || null,
-            ]
-          );
+          let questionId;
+          if (isPG) {
+            const [qRows] = await conn.query(
+              `INSERT INTO questions (session_id, question_text, question_order, category)
+               VALUES ($1,$2,$3,$4) RETURNING id`,
+              [sessionId, ex.question, i + 1, ex.category || 'general']
+            );
+            questionId = qRows[0].id;
+          } else {
+            const [qResult] = await conn.query(
+              `INSERT INTO questions (session_id, question_text, question_order, category)
+               VALUES (?,?,?,?)`,
+              [sessionId, ex.question, i + 1, ex.category || 'general']
+            );
+            questionId = qResult.insertId;
+          }
+
+          if (ex.answer) {
+            const vals = isPG ? '$1,$2,$3,$4,$5' : '?,?,?,?,?';
+            await conn.query(
+              `INSERT INTO responses
+               (question_id, session_id, response_text, ai_feedback, score)
+               VALUES (${vals})`,
+              [
+                questionId, sessionId,
+                ex.answer || '',
+                ex.feedback ? JSON.stringify(ex.feedback) : null,
+                ex.feedback?.score || null,
+              ]
+            );
+          }
         }
+        console.log(`✅ Questions inserted for session ${sessionId}`);
+      } else {
+        console.log(`⚠️ Questions already exist for session ${sessionId}, skipping`);
       }
     }
 
     await conn.commit();
-    console.log(`✅ Session committed. ID: ${sessionId}`);
     res.status(201).json({ id: sessionId });
   } catch (err) {
     await conn.rollback();
+    // Handle unique constraint violation gracefully
+    if (err.code === '23505' || err.message?.includes('unique') || err.message?.includes('duplicate')) {
+      console.log(`⚠️ Unique constraint caught: ${session_key}`);
+      return res.status(200).json({ duplicate: true, message: 'Session already saved' });
+    }
     console.error('❌ Session save error:', err.message);
     res.status(500).json({ message: 'Server error', error: err.message });
   } finally {

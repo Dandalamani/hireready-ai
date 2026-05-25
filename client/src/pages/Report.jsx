@@ -19,6 +19,18 @@ const Report = () => {
       return;
     }
 
+      // Use sessionStorage as cross-render lock
+  const lockKey = `report_lock_${state?.session_key || 'nokey'}`;
+  if (sessionStorage.getItem(lockKey)) {
+    console.log('⚠️ Report already processing, skipping');
+    setLoading(false);
+    return;
+  }
+  sessionStorage.setItem(lockKey, '1');
+
+  // Clean lock after 10 seconds
+  setTimeout(() => sessionStorage.removeItem(lockKey), 10000);
+
     // Double guard — ref + module Set
     if (hasRun.current) return;
     const sessionKey = state?.session_key || `no_key_${Date.now()}`;
