@@ -40,11 +40,11 @@ const query = async (sql, params = []) => {
     const converted = convertQuery(sql);
     try {
       const result = await pgPool.query(converted, params);
-      return [result.rows, result.fields];
+      // Return [rows, {rowCount, fields}] so UPDATE/DELETE rowCount is accessible
+      return [result.rows, { rowCount: result.rowCount, fields: result.fields }];
     } catch (err) {
       console.error('❌ PG Query error:', err.message);
       console.error('SQL:', converted);
-      console.error('Params:', params);
       throw err;
     }
   } else {
@@ -59,20 +59,19 @@ const getConnection = async () => {
     let paramCount = 0;
 
     return {
-      query: async (sql, params = []) => {
-        paramCount = 0;
-        const converted = sql
-          .replace(/\?/g, () => `$${++paramCount}`)
-          .replace(/`/g, '"');
-        try {
-          const result = await client.query(converted, params);
-          return [result.rows, result.fields];
-        } catch (err) {
-          console.error('❌ PG Transaction query error:', err.message);
-          console.error('SQL:', converted);
-          throw err;
-        }
-      },
+query: async (sql, params = []) => {
+  paramCount = 0;
+  const converted = sql
+    .replace(/\?/g, () => `$${++paramCount}`)
+    .replace(/`/g, '"');
+  try {
+    const result = await client.query(converted, params);
+    return [result.rows, { rowCount: result.rowCount, fields: result.fields }];
+  } catch (err) {
+    console.error('❌ PG Transaction query error:', err.message);
+    throw err;
+  }
+},
       beginTransaction: async () => {
         paramCount = 0;
         await client.query('BEGIN');

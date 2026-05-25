@@ -13,139 +13,135 @@ const Report = () => {
   const [loading, setLoading] = useState(true);
   const hasRun = useRef(false);
 
-  useEffect(() => {
-    if (!state?.exchanges?.length) {
-      navigate('/dashboard');
-      return;
-    }
+useEffect(() => {
+  if (!state?.exchanges?.length) {
+    navigate('/dashboard');
+    return;
+  }
 
-      // Use sessionStorage as cross-render lock
+  // ── LOCK 1: sessionStorage (survives re-renders) ──
   const lockKey = `report_lock_${state?.session_key || 'nokey'}`;
   if (sessionStorage.getItem(lockKey)) {
-    console.log('⚠️ Report already processing, skipping');
+    console.log('⚠️ sessionStorage lock active — skipping');
     setLoading(false);
     return;
   }
   sessionStorage.setItem(lockKey, '1');
+  setTimeout(() => sessionStorage.removeItem(lockKey), 15000);
 
-  // Clean lock after 10 seconds
-  setTimeout(() => sessionStorage.removeItem(lockKey), 10000);
+  // ── LOCK 2: ref (survives StrictMode double call) ──
+  if (hasRun.current) {
+    console.log('⚠️ hasRun ref active — skipping');
+    setLoading(false);
+    return;
+  }
+  hasRun.current = true;
 
-    // Double guard — ref + module Set
-    if (hasRun.current) return;
-    const sessionKey = state?.session_key || `no_key_${Date.now()}`;
-    if (processedSessions.has(sessionKey)) {
-      console.log('⚠️ Session already processed:', sessionKey);
-      return;
-    }
+  // ── LOCK 3: module-level Set ──
+  const sessionKey = state?.session_key || `no_key_${Date.now()}`;
+  if (processedSessions.has(sessionKey)) {
+    console.log('⚠️ processedSessions Set active — skipping:', sessionKey);
+    setLoading(false);
+    return;
+  }
+  processedSessions.add(sessionKey);
 
-    hasRun.current = true;
-    processedSessions.add(sessionKey);
+  const fetchAndSave = async () => {
+    try {
+      const res = await axios.post('/api/groq/report', {
+        role: state.role,
+        exchanges: state.exchanges,
+      });
+      const reportData = res.data;
+      setReport(reportData);
+      console.log('📊 Report score:', reportData.overallScore);
 
-    const fetchAndSave = async () => {
-      try {
-        // Generate report
-        const res = await axios.post('/api/groq/report', {
-          role: state.role,
-          exchanges: state.exchanges,
-        });
-        const reportData = res.data;
-        setReport(reportData);
-
-        console.log('📊 Report score:', reportData.overallScore);
-
-        // Save session
-        if (state.session_key) {
-          try {
-            const updateRes = await axios.patch('/api/sessions/update-score', {
-              session_key: state.session_key,
-              score: reportData.overallScore,
-              confidence: reportData.confidence || null,
-              pacing: reportData.pacingWPM
-                ? `${reportData.pacingWPM} WPM`
-                : null,
-            });
-
-            console.log('✅ Score update rows:', updateRes.data.affectedRows);
-
-            if (updateRes.data.affectedRows === 0) {
-              // Session not found — save fresh
-              await axios.post('/api/sessions', {
-                target_role: state.role,
-                mode: state.mode || 'questions',
-                difficulty: state.difficulty || 'intermediate',
-                score: reportData.overallScore,
-                confidence: reportData.confidence || null,
-                pacing: reportData.pacingWPM
-                  ? `${reportData.pacingWPM} WPM`
-                  : 'Normal',
-                filler_words: 'Low',
-                duration_minutes: Math.max(
-                  1,
-                  Math.ceil((state.exchanges?.length || 1) * 1.5)
-                ),
-                session_key: state.session_key,
-                exchanges: state.exchanges.map(ex => ({
-                  question: ex.question || '',
-                  answer: ex.answer || '',
-                  category: 'general',
-                  feedback: ex.feedback || null,
-                })),
-              });
-              console.log('✅ Fresh session saved');
-            }
-          } catch (updateErr) {
-            console.error('Update error:', updateErr.message);
-          }
-        } else {
-          // No session key
-          const uniqueKey = `report_${Date.now()}_${Math.random().toString(36).substr(2,6)}`;
-          await axios.post('/api/sessions', {
-            target_role: state.role,
-            mode: state.mode || 'questions',
-            difficulty: state.difficulty || 'intermediate',
+      if (state.session_key) {
+        try {
+          const updateRes = await axios.patch('/api/sessions/update-score', {
+            session_key: state.session_key,
             score: reportData.overallScore,
             confidence: reportData.confidence || null,
             pacing: reportData.pacingWPM
               ? `${reportData.pacingWPM} WPM`
-              : 'Normal',
-            filler_words: 'Low',
-            duration_minutes: Math.max(
-              1,
-              Math.ceil((state.exchanges?.length || 1) * 1.5)
-            ),
-            session_key: uniqueKey,
-            exchanges: state.exchanges.map(ex => ({
-              question: ex.question || '',
-              answer: ex.answer || '',
-              category: 'general',
-              feedback: ex.feedback || null,
-            })),
+              : null,
           });
-          console.log('✅ Session saved (no key)');
-        }
+          console.log('✅ Score update rows:', updateRes.data.affectedRows);
 
-        // Store in RAG
-        try {
-          await axios.post('/api/rag/store-session', {
-            sessionId: state.session_key || `session_${Date.now()}`,
-            exchanges: state.exchanges,
-            role: state.role,
-          });
-          console.log('✅ RAG stored');
-        } catch (ragErr) {
-          console.log('⚠️ RAG skipped:', ragErr.message);
+          if (updateRes.data.affectedRows === 0) {
+            await axios.post('/api/sessions', {
+              target_role: state.role,
+              mode: state.mode || 'questions',
+              difficulty: state.difficulty || 'intermediate',
+              score: reportData.overallScore,
+              confidence: reportData.confidence || null,
+              pacing: reportData.pacingWPM
+                ? `${reportData.pacingWPM} WPM`
+                : 'Normal',
+              filler_words: 'Low',
+              duration_minutes: Math.max(
+                1, Math.ceil((state.exchanges?.length || 1) * 1.5)
+              ),
+              session_key: state.session_key,
+              exchanges: state.exchanges.map(ex => ({
+                question: ex.question || '',
+                answer: ex.answer || '',
+                category: 'general',
+                feedback: ex.feedback || null,
+              })),
+            });
+            console.log('✅ Fresh session saved');
+          }
+        } catch (updateErr) {
+          console.error('Update error:', updateErr.message);
         }
-
-      } catch (err) {
-        console.error('❌ Report error:', err.response?.data || err.message);
-      } finally {
-        setLoading(false);
+      } else {
+        const uniqueKey = `report_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`;
+        await axios.post('/api/sessions', {
+          target_role: state.role,
+          mode: state.mode || 'questions',
+          difficulty: state.difficulty || 'intermediate',
+          score: reportData.overallScore,
+          confidence: reportData.confidence || null,
+          pacing: reportData.pacingWPM
+            ? `${reportData.pacingWPM} WPM`
+            : 'Normal',
+          filler_words: 'Low',
+          duration_minutes: Math.max(
+            1, Math.ceil((state.exchanges?.length || 1) * 1.5)
+          ),
+          session_key: uniqueKey,
+          exchanges: state.exchanges.map(ex => ({
+            question: ex.question || '',
+            answer: ex.answer || '',
+            category: 'general',
+            feedback: ex.feedback || null,
+          })),
+        });
+        console.log('✅ Session saved (no key)');
       }
-    };
 
-    fetchAndSave();
-  }, []); // eslint-disable-line
+      // Store in RAG
+      try {
+        await axios.post('/api/rag/store-session', {
+          sessionId: state.session_key || `session_${Date.now()}`,
+          exchanges: state.exchanges,
+          role: state.role,
+        });
+        console.log('✅ RAG stored');
+      } catch (ragErr) {
+        console.log('⚠️ RAG skipped:', ragErr.message);
+      }
+
+    } catch (err) {
+      console.error('❌ Report error:', err.response?.data || err.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  fetchAndSave();
+}, []); // eslint-disable-line
 
   if (loading) return (
     <div className="flex min-h-screen bg-slate-50">

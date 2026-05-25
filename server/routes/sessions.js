@@ -251,7 +251,6 @@ router.patch('/update-score', protect, async (req, res) => {
 
   if (!session_key) return res.status(400).json({ message: 'session_key required' });
 
-  // Sanitize confidence
   const confMap = { 'Very High': 'Very High', 'High': 'High', 'Medium': 'Medium', 'Low': 'Low' };
   let sanitizedConfidence = null;
   if (confidence) {
@@ -268,9 +267,8 @@ router.patch('/update-score', protect, async (req, res) => {
   }
 
   try {
-    let result;
     if (isPG) {
-      result = await db.query(
+      const [rows, meta] = await db.query(
         `UPDATE interview_sessions 
          SET score = $1,
              confidence = COALESCE($2, confidence),
@@ -278,7 +276,7 @@ router.patch('/update-score', protect, async (req, res) => {
          WHERE session_key = $4 AND user_id = $5`,
         [score, sanitizedConfidence, pacing || null, session_key, req.user.id]
       );
-      const affectedRows = result[0]?.rowCount || 0;
+      const affectedRows = meta?.rowCount || 0;
       console.log(`✅ Score updated: ${score} | Rows: ${affectedRows}`);
       res.json({ message: 'Score updated', affectedRows });
     } else {
