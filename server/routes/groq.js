@@ -406,7 +406,7 @@ Analyze the above and return the JSON report.`,
       res.json(report);
     } else {
       // Fallback with reasonable scores based on exchange count
-      const baseScore = Math.min(85, 60 + exchanges.length * 3);
+      const baseScore = Math.min(85, 60 + answeredExchanges.length * 3);
       console.log('⚠️ Using fallback report. Base score:', baseScore);
       res.json({
         overallScore: baseScore,
@@ -428,7 +428,7 @@ Analyze the above and return the JSON report.`,
   } catch (err) {
     if (err.message === 'GROQ_LIMIT_REACHED') return sendLimitError(res, err.groqStatus);
     console.error('❌ Report generation error:', err.message);
-    const baseScore = Math.min(85, 60 + (exchanges?.length || 1) * 3);
+    const baseScore = Math.min(85, 60 + (answeredExchanges?.length || 1) * 3);
     res.json({
       overallScore: baseScore,
       clarity: baseScore + 5,
