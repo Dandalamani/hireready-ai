@@ -51,6 +51,7 @@ const Interview = () => {
   const [alwaysListening, setAlwaysListening] = useState(true);
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [error, setError] = useState('');
+  const [micPermission, setMicPermission] = useState('unknown');
 
   const recognitionRef = useRef(null);
   const timerRef = useRef(null);
@@ -61,21 +62,26 @@ const Interview = () => {
   const sessionSavedRef = useRef(false);
   const exchangesRef = useRef([]);
   const currentQuestionRef = useRef('');
+  const phaseRef = useRef('loading');
+  const showBlockedRef = useRef(showBlocked);
+  const alwaysListeningRef = useRef(alwaysListening);
+
   const sessionKeyRef = useRef(
     `${state?.projectBased ? 'project' : 'session'}_${
       state?.repoName ? state.repoName.replace(/[^a-zA-Z0-9]/g, '') + '_' : ''
     }${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
   );
 
-  // Keep exchangesRef in sync
-  useEffect(() => {
-    exchangesRef.current = exchanges;
-  }, [exchanges]);
+  // Keep refs in sync
+  useEffect(() => { exchangesRef.current = exchanges; }, [exchanges]);
+  useEffect(() => { currentQuestionRef.current = currentQuestion; }, [currentQuestion]);
+  useEffect(() => { phaseRef.current = phase; }, [phase]);
+  useEffect(() => { showBlockedRef.current = showBlocked; }, [showBlocked]);
+  useEffect(() => { alwaysListeningRef.current = alwaysListening; }, [alwaysListening]);
 
-  // Keep currentQuestionRef in sync
   useEffect(() => {
-    currentQuestionRef.current = currentQuestion;
-  }, [currentQuestion]);
+    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [exchanges, transcript]);
 
   const formatTime = secs => {
     const m = Math.floor(secs / 60).toString().padStart(2, '0');
@@ -83,49 +89,30 @@ const Interview = () => {
     return `${m}:${s}`;
   };
 
-  useEffect(() => {
-    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [exchanges, transcript]);
-
-  // ── Save session to DB ──
-  const saveSessionToDb = useCallback(async (exchangesToSave, score, confidence, pacing) => {
-    if (!exchangesToSave || exchangesToSave.length === 0) {
-      console.log('⚠️ No exchanges to save');
-      return null;
-    }
-    if (sessionSavedRef.current) {
-      console.log('⚠️ Already saved, skipping');
-      return null;
-    }
+  // ── Save session ──
+  const saveSessionToDb = useCallback(async (exchangesToSave) => {
+    if (!exchangesToSave || exchangesToSave.length === 0) return null;
+    if (sessionSavedRef.current) return null;
     sessionSavedRef.current = true;
 
-    const payload = {
-      target_role: role,
-      mode: mode,
-      difficulty: state?.difficulty || 'intermediate',
-      score: score || null,
-      confidence: confidence || null,
-      pacing: pacing || null,
-      filler_words: 'Low',
-      duration_minutes: Math.max(1, Math.ceil(exchangesToSave.length * 1.5)),
-      session_key: sessionKeyRef.current,
-      exchanges: exchangesToSave.map(ex => ({
-        question: ex.question || '',
-        answer: ex.answer || '',
-        category: 'general',
-        feedback: ex.feedback || null,
-      })),
-    };
-
-    console.log('💾 Saving session:', {
-      role: payload.target_role,
-      exchanges: payload.exchanges.length,
-      score: payload.score,
-      key: payload.session_key,
-    });
-
     try {
-      const res = await axios.post('/api/sessions', payload);
+      const res = await axios.post('/api/sessions', {
+        target_role: role,
+        mode,
+        difficulty: state?.difficulty || 'intermediate',
+        score: null,
+        confidence: null,
+        pacing: null,
+        filler_words: 'Low',
+        duration_minutes: Math.max(1, Math.ceil(exchangesToSave.length * 1.5)),
+        session_key: sessionKeyRef.current,
+        exchanges: exchangesToSave.map(ex => ({
+          question: ex.question || '',
+          answer: ex.answer || '',
+          category: 'general',
+          feedback: ex.feedback || null,
+        })),
+      });
       console.log('✅ Session saved! ID:', res.data.id);
       return res.data;
     } catch (err) {
@@ -134,9 +121,6 @@ const Interview = () => {
       return null;
     }
   }, [role, mode, state]);
-
-  // ── Update score after report ──
-  
 
   const speakQuestion = useCallback((question) => {
     setIsSpeaking(true);
@@ -148,16 +132,25 @@ const Interview = () => {
     });
   }, []);
 
+  // ── Setup recognition — KEY FIX: auto-restart on end ──
   const setupRecognition = useCallback(() => {
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SpeechRecognition) {
-      setError('Use Chrome or Edge for voice support.');
+      setError('Voice not supported. Please use Chrome or Edge browser.');
       return null;
     }
+
     const recognition = new SpeechRecognition();
     recognition.continuous = true;
     recognition.interimResults = true;
     recognition.lang = 'en-US';
+    recognition.maxAlternatives = 1;
+
+    recognition.onstart = () => {
+      console.log('🎤 Mic started');
+      setIsListening(true);
+    };
+
     recognition.onresult = e => {
       let interim = '';
       let final = '';
@@ -168,32 +161,74 @@ const Interview = () => {
       if (final) transcriptRef.current += ' ' + final;
       setTranscript((transcriptRef.current + ' ' + interim).trim());
     };
+
     recognition.onerror = e => {
-      if (e.error !== 'no-speech') console.error('Speech error:', e.error);
+      console.error('🎤 Speech error:', e.error);
+      if (e.error === 'not-allowed' || e.error === 'permission-denied') {
+        setError('Microphone blocked. Click the camera/mic icon in your browser address bar and allow access, then refresh.');
+        setMicPermission('denied');
+        setIsListening(false);
+      } else if (e.error === 'network') {
+        setError('Network error with speech. Check your internet connection.');
+        setIsListening(false);
+      }
+      // no-speech is normal — don't set error or isListening false
     };
-    recognition.onend = () => setIsListening(false);
+
+    // KEY FIX: auto-restart when recognition stops unexpectedly
+    recognition.onend = () => {
+      console.log('🎤 Mic ended. Phase:', phaseRef.current);
+      setIsListening(false);
+
+      // Only restart if we're still in listening phase and not blocked
+      if (phaseRef.current === 'listening' && !showBlockedRef.current) {
+        console.log('🔄 Auto-restarting mic...');
+        setTimeout(() => {
+          if (phaseRef.current === 'listening' && !showBlockedRef.current) {
+            try {
+              recognition.start();
+            } catch (e) {
+              console.log('Restart error (ok):', e.message);
+            }
+          }
+        }, 300);
+      }
+    };
+
     return recognition;
   }, []);
 
   const startListening = useCallback(() => {
+    if (micPermission === 'denied') return;
     try {
-      recognitionRef.current?.abort();
+      if (recognitionRef.current) {
+        try { recognitionRef.current.abort(); } catch {}
+      }
       recognitionRef.current = setupRecognition();
-      recognitionRef.current?.start();
-      setIsListening(true);
+      if (recognitionRef.current) {
+        recognitionRef.current.start();
+        setIsListening(true);
+        console.log('🎤 Starting mic');
+      }
     } catch (e) {
       console.error('Start listening error:', e);
     }
-  }, [setupRecognition]);
+  }, [setupRecognition, micPermission]);
 
   const stopListening = useCallback(() => {
-    try { recognitionRef.current?.stop(); } catch {}
+    try {
+      recognitionRef.current?.stop();
+    } catch {}
     setIsListening(false);
   }, []);
 
   // ── Analyze and next ──
   const analyzeAndNext = useCallback(async (answerText) => {
-    const answer = answerText?.trim() || '[No response]';
+    // KEY FIX: detect empty answer before sending
+    const trimmed = answerText?.trim() || '';
+    const hasRealAnswer = trimmed.length > 3 && trimmed !== '[No response]';
+    const answer = hasRealAnswer ? trimmed : '[No response]';
+
     setPhase('analyzing');
     stopListening();
     window.speechSynthesis.cancel();
@@ -216,7 +251,7 @@ const Interview = () => {
 
       const newExchange = {
         question: currentQuestionRef.current,
-        answer,
+        answer: hasRealAnswer ? answer : '[No response]',
         feedback: fb,
       };
       const updatedExchanges = [...exchangesRef.current, newExchange];
@@ -226,11 +261,7 @@ const Interview = () => {
 
       if (isLast) {
         setPhase('done');
-        console.log('🏁 Last question done. Saving session...');
-
-        // Save session first, then navigate
-        await saveSessionToDb(updatedExchanges, null, null, null);
-
+        await saveSessionToDb(updatedExchanges);
         speak('Great session! Generating your performance report now.', () => {
           navigate('/report', {
             state: {
@@ -247,7 +278,7 @@ const Interview = () => {
 
       // Next question
       setTimeout(async () => {
-        if (showBlocked) {
+        if (showBlockedRef.current) {
           setError('Groq API limit reached. Session paused.');
           setPhase('listening');
           return;
@@ -259,23 +290,29 @@ const Interview = () => {
         const nextNum = questionNumber + 1;
         setQuestionNumber(nextNum);
 
-        let nextQuestion = '';
-        if (remainingQuestionsRef.current?.length > 0) {
-          nextQuestion = remainingQuestionsRef.current.shift();
-        } else {
-          const nextRes = await axios.post('/api/groq/next', {
-            role,
-            previousQuestion: currentQuestionRef.current,
-            userAnswer: answer,
-            questionNumber: nextNum,
-            totalQuestions: totalQuestionsTarget,
-          });
-          nextQuestion = nextRes.data.question;
-          if (nextRes.data.groqStatus) updateStatus(nextRes.data.groqStatus);
+        try {
+          let nextQuestion = '';
+          if (remainingQuestionsRef.current?.length > 0) {
+            nextQuestion = remainingQuestionsRef.current.shift();
+          } else {
+            const nextRes = await axios.post('/api/groq/next', {
+              role,
+              previousQuestion: currentQuestionRef.current,
+              userAnswer: answer,
+              questionNumber: nextNum,
+              totalQuestions: totalQuestionsTarget,
+            });
+            nextQuestion = nextRes.data.question;
+            if (nextRes.data.groqStatus) updateStatus(nextRes.data.groqStatus);
+          }
+          setCurrentQuestion(nextQuestion);
+          speakQuestion(nextQuestion);
+        } catch (nextErr) {
+          console.error('Next question error:', nextErr);
+          const fallback = 'Tell me about another challenge you have faced in your work.';
+          setCurrentQuestion(fallback);
+          speakQuestion(fallback);
         }
-
-        setCurrentQuestion(nextQuestion);
-        speakQuestion(nextQuestion);
       }, 2000);
 
     } catch (err) {
@@ -283,6 +320,15 @@ const Interview = () => {
       if (err.response?.status === 429) {
         if (err.response?.data?.groqStatus) updateStatus(err.response.data.groqStatus);
         setError('Groq API limit reached. Please wait.');
+      } else {
+        setError('Analysis failed. Moving to next question...');
+        // Still move forward even if analyze fails
+        const newExchange = {
+          question: currentQuestionRef.current,
+          answer: hasRealAnswer ? answer : '[No response]',
+          feedback: { score: 0, tags: ['Error'], tip: 'Analysis failed' },
+        };
+        setExchanges(prev => [...prev, newExchange]);
       }
       setPhase('listening');
     }
@@ -299,22 +345,27 @@ const Interview = () => {
       setCountdown(prev => {
         if (prev <= 1) {
           clearInterval(countdownRef.current);
-          if (alwaysListening && !showBlocked) setPhase('listening');
+          if (alwaysListeningRef.current && !showBlockedRef.current) {
+            setPhase('listening');
+          }
           return 0;
         }
         return prev - 1;
       });
     }, 1000);
     return () => clearInterval(countdownRef.current);
-  }, [phase, alwaysListening, showBlocked]);
+  }, [phase]);
 
-  // Start mic
+  // Start/stop mic based on phase
   useEffect(() => {
-    if (phase === 'listening' && !showBlocked) startListening();
-    else stopListening();
+    if (phase === 'listening' && !showBlocked) {
+      startListening();
+    } else {
+      stopListening();
+    }
   }, [phase, showBlocked]); // eslint-disable-line
 
-  // Timer
+  // Timer mode
   useEffect(() => {
     if (mode !== 'time') return;
     timerRef.current = setInterval(() => {
@@ -332,7 +383,19 @@ const Interview = () => {
 
   // Init
   useEffect(() => {
-    recognitionRef.current = setupRecognition();
+    // Check mic permission first
+    navigator.mediaDevices?.getUserMedia({ audio: true })
+      .then(stream => {
+        stream.getTracks().forEach(t => t.stop());
+        setMicPermission('granted');
+        console.log('✅ Mic permission granted');
+      })
+      .catch(err => {
+        console.error('❌ Mic permission denied:', err);
+        setMicPermission('denied');
+        setError('Microphone access denied. Click the mic icon in the browser address bar → Allow → Refresh.');
+      });
+
     const loadVoices = () => window.speechSynthesis.getVoices();
     loadVoices();
     window.speechSynthesis.onvoiceschanged = loadVoices;
@@ -352,16 +415,23 @@ const Interview = () => {
           speakQuestion(q);
         }
       } catch (err) {
+        console.error('Init error:', err);
         if (err.response?.status === 429) {
           if (err.response?.data?.groqStatus) updateStatus(err.response.data.groqStatus);
           setError('Groq API limit reached. Please wait.');
           setPhase('thinking');
-          setCurrentQuestion('API limit reached. Please wait a moment.');
+          setCurrentQuestion('API limit reached. Please wait a moment and refresh.');
         } else {
+          // KEY FIX: show specific error for API key issues
+          const isApiKeyError = err.response?.status === 401 || err.response?.status === 403;
           const fallback = 'Tell me about yourself and your experience relevant to this role.';
           setCurrentQuestion(fallback);
           speakQuestion(fallback);
-          setError('Using fallback question — check your Groq API key.');
+          if (isApiKeyError) {
+            setError('Groq API key invalid or expired. Please update it in Render environment variables.');
+          } else {
+            setError('Could not connect to AI. Using fallback question. Check your internet connection.');
+          }
         }
       }
     };
@@ -393,8 +463,7 @@ const Interview = () => {
 
     const currentExchanges = exchangesRef.current;
     if (currentExchanges.length > 0) {
-      console.log('🔚 Ending session with', currentExchanges.length, 'exchanges');
-      await saveSessionToDb(currentExchanges, null, null, null);
+      await saveSessionToDb(currentExchanges);
       navigate('/report', {
         state: {
           role,
@@ -418,6 +487,9 @@ const Interview = () => {
     done:      { label: 'Session complete! Generating report...', color: 'text-blue-600' },
   };
   const currentPhaseInfo = phaseInfo[phase] || phaseInfo.loading;
+
+  // Mic permission warning
+  const showMicWarning = micPermission === 'denied';
 
   return (
     <div className="flex flex-col h-screen bg-slate-50 overflow-hidden">
@@ -467,11 +539,18 @@ const Interview = () => {
         </div>
       </nav>
 
+      {/* Mic permission warning */}
+      {showMicWarning && (
+        <div className="bg-red-50 border-b border-red-200 px-8 py-2 text-sm text-red-700 flex-shrink-0 flex items-center justify-between">
+          <span>🎤 Microphone blocked — Click the mic/camera icon in your browser address bar → Allow → Refresh the page</span>
+        </div>
+      )}
+
       {/* Error banner */}
-      {error && (
+      {error && !showMicWarning && (
         <div className="bg-yellow-50 border-b border-yellow-200 px-8 py-2 text-sm text-yellow-700 flex-shrink-0 flex items-center justify-between">
           <span>⚠️ {error}</span>
-          <button onClick={() => setError('')} className="text-yellow-500 hover:text-yellow-700">✕</button>
+          <button onClick={() => setError('')} className="text-yellow-500 hover:text-yellow-700 ml-4">✕</button>
         </div>
       )}
 
@@ -535,15 +614,19 @@ const Interview = () => {
           <div className="flex flex-col items-center gap-3 mt-2">
             <button
               onClick={handleMicButton}
-              disabled={phase === 'analyzing' || phase === 'loading' || phase === 'done' || phase === 'speaking' || showBlocked}
+              disabled={
+                phase === 'analyzing' || phase === 'loading' ||
+                phase === 'done' || phase === 'speaking' ||
+                showBlocked || micPermission === 'denied'
+              }
               className={`w-16 h-16 rounded-full flex items-center justify-center transition-all shadow-lg
-                ${showBlocked ? 'bg-red-200 cursor-not-allowed'
+                ${showBlocked || micPermission === 'denied' ? 'bg-red-200 cursor-not-allowed'
                   : phase === 'listening' ? 'bg-blue-600 hover:bg-blue-700 scale-110'
                   : phase === 'thinking' ? 'bg-amber-500 hover:bg-amber-600'
                   : 'bg-slate-200 hover:bg-slate-300'
                 } disabled:opacity-40 disabled:cursor-not-allowed`}
             >
-              {showBlocked ? (
+              {showBlocked || micPermission === 'denied' ? (
                 <svg className="w-7 h-7 text-red-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
                     d="M18.364 18.364A9 9 0 005.636 5.636m12.728 12.728A9 9 0 015.636 5.636"/>
@@ -558,7 +641,8 @@ const Interview = () => {
             </button>
 
             <p className="text-xs font-bold uppercase tracking-widest text-blue-600">
-              {showBlocked ? 'API LIMIT REACHED'
+              {micPermission === 'denied' ? 'MIC BLOCKED — ALLOW IN BROWSER'
+                : showBlocked ? 'API LIMIT REACHED'
                 : phase === 'listening' ? 'TAP TO SUBMIT'
                 : phase === 'thinking' ? 'TAP TO ANSWER NOW'
                 : phase === 'speaking' ? 'COACH IS SPEAKING'
@@ -568,17 +652,21 @@ const Interview = () => {
             <div className="flex items-center gap-2 mt-1">
               <span className="text-xs text-slate-500">Always Listening</span>
               <button
-                onClick={() => setAlwaysListening(!alwaysListening)}
-                disabled={showBlocked}
+                onClick={() => setAlwaysListening(prev => !prev)}
+                disabled={showBlocked || micPermission === 'denied'}
                 className={`relative w-10 h-5 rounded-full transition-colors
-                  ${alwaysListening && !showBlocked ? 'bg-blue-600' : 'bg-slate-200'}`}
+                  ${alwaysListening && !showBlocked && micPermission !== 'denied'
+                    ? 'bg-blue-600' : 'bg-slate-200'}`}
               >
                 <span className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform
-                  ${alwaysListening && !showBlocked ? 'translate-x-5' : ''}`} />
+                  ${alwaysListening && !showBlocked && micPermission !== 'denied'
+                    ? 'translate-x-5' : ''}`} />
               </button>
             </div>
             <p className="text-xs text-slate-400 text-center">
-              {showBlocked ? 'Resume after API limit resets'
+              {micPermission === 'denied'
+                ? 'Allow microphone access in browser settings to enable voice.'
+                : showBlocked ? 'Resume after API limit resets'
                 : 'Mic auto-activates after 5s of AI silence when enabled.'}
             </p>
           </div>
@@ -590,9 +678,15 @@ const Interview = () => {
             <h3 className="text-sm font-semibold text-slate-800">Live Transcription</h3>
             <div className="flex items-center gap-1.5">
               <div className={`w-2 h-2 rounded-full transition-colors
-                ${showBlocked ? 'bg-red-400' : isListening ? 'bg-green-500 animate-pulse' : 'bg-slate-300'}`}/>
+                ${micPermission === 'denied' ? 'bg-red-400'
+                  : showBlocked ? 'bg-red-400'
+                  : isListening ? 'bg-green-500 animate-pulse'
+                  : 'bg-slate-300'}`}/>
               <span className="text-xs text-slate-500">
-                {showBlocked ? 'Paused' : isListening ? 'Active' : 'Inactive'}
+                {micPermission === 'denied' ? 'Blocked'
+                  : showBlocked ? 'Paused'
+                  : isListening ? 'Active'
+                  : 'Inactive'}
               </span>
             </div>
           </div>
@@ -607,20 +701,30 @@ const Interview = () => {
                   <p className="text-xs text-slate-400 mt-1 ml-2">Coach Roberts</p>
                 </div>
                 <div className="max-w-[85%] self-end">
-                  <div className="bg-blue-600 rounded-2xl rounded-tr-none px-4 py-3">
-                    <p className="text-sm text-white leading-relaxed">{ex.answer}</p>
+                  <div className={`rounded-2xl rounded-tr-none px-4 py-3
+                    ${ex.answer === '[No response]' ? 'bg-slate-300' : 'bg-blue-600'}`}>
+                    <p className={`text-sm leading-relaxed
+                      ${ex.answer === '[No response]' ? 'text-slate-500 italic' : 'text-white'}`}>
+                      {ex.answer === '[No response]' ? 'No response given' : ex.answer}
+                    </p>
                   </div>
                   <p className="text-xs text-slate-400 mt-1 text-right mr-2">You</p>
                 </div>
                 {ex.feedback && (
                   <div className="flex flex-wrap gap-1 justify-end">
                     {ex.feedback.tags?.map(tag => (
-                      <span key={tag} className="text-xs bg-green-50 text-green-600 border border-green-200 px-2 py-0.5 rounded-full">
+                      <span key={tag} className={`text-xs px-2 py-0.5 rounded-full border
+                        ${tag === 'No Response'
+                          ? 'bg-red-50 text-red-500 border-red-200'
+                          : 'bg-green-50 text-green-600 border-green-200'}`}>
                         {tag}
                       </span>
                     ))}
-                    <span className="text-xs bg-blue-50 text-blue-600 border border-blue-100 px-2 py-0.5 rounded-full">
-                      Score {ex.feedback.score}/10
+                    <span className={`text-xs px-2 py-0.5 rounded-full border
+                      ${(ex.feedback.score || 0) === 0
+                        ? 'bg-red-50 text-red-500 border-red-100'
+                        : 'bg-blue-50 text-blue-600 border-blue-100'}`}>
+                      Score {ex.feedback.score ?? 0}/10
                     </span>
                   </div>
                 )}
@@ -637,7 +741,7 @@ const Interview = () => {
               </div>
             )}
 
-            {phase === 'listening' && !showBlocked && (
+            {phase === 'listening' && !showBlocked && micPermission !== 'denied' && (
               <div className="max-w-[85%] self-end">
                 <div className="bg-blue-50 border border-blue-200 rounded-2xl rounded-tr-none px-4 py-3">
                   <p className="text-sm text-slate-600 italic leading-relaxed">
@@ -651,6 +755,13 @@ const Interview = () => {
                   </p>
                 </div>
                 <p className="text-xs text-slate-400 mt-1 text-right mr-2">You • live</p>
+              </div>
+            )}
+
+            {micPermission === 'denied' && (
+              <div className="bg-red-50 border border-red-100 rounded-xl px-4 py-3 text-center">
+                <p className="text-xs font-semibold text-red-500 mb-1">🎤 Microphone Blocked</p>
+                <p className="text-xs text-red-400">Click the mic icon in your browser address bar, select Allow, then refresh this page.</p>
               </div>
             )}
 

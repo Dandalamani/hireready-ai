@@ -254,6 +254,19 @@ This is question ${questionNumber} of ${totalQuestions}. Generate the next targe
 // ── Analyze answer ──
 router.post('/analyze', protect, async (req, res) => {
   const { role, question, answer } = req.body;
+
+  // If no answer given — return score 0 immediately, no Groq call
+  if (!answer || answer.trim() === '' || answer === '[No response]') {
+    return res.json({
+      score: 0,
+      confidence: 'Low',
+      pacing: 'None',
+      tags: ['No Response'],
+      tip: 'Please speak your answer clearly into the microphone.',
+      groqStatus: usageTracker.getStatus(),
+    });
+  }
+
   try {
     const completion = await groqCall([
       {
@@ -261,7 +274,8 @@ router.post('/analyze', protect, async (req, res) => {
         content: `You are Coach Roberts, an expert interview coach.
 Analyze the answer and return ONLY a JSON object. No markdown, no backticks.
 Use exactly this format:
-{"score":7,"confidence":"High","pacing":"Normal","tags":["Good Structure"],"tip":"Use specific examples"}`,
+{"score":7,"confidence":"High","pacing":"Normal","tags":["Good Structure"],"tip":"Use specific examples"}
+Score must reflect actual answer quality — 0 for no answer, 1-3 for very poor, 4-6 for average, 7-8 for good, 9-10 for excellent.`,
       },
       {
         role: 'user',
@@ -275,21 +289,27 @@ Use exactly this format:
     if (parsed) {
       res.json({ ...parsed, groqStatus: usageTracker.getStatus() });
     } else {
+      // Parse failed — give neutral score, NOT 7
       res.json({
-        score: 7,
+        score: 5,
         confidence: 'Medium',
         pacing: 'Normal',
-        tags: ['Good Effort'],
+        tags: ['Keep Practicing'],
         tip: 'Use the STAR method for structured answers.',
         groqStatus: usageTracker.getStatus(),
       });
     }
   } catch (err) {
     if (err.message === 'GROQ_LIMIT_REACHED') return sendLimitError(res, err.groqStatus);
+    if (err.message === 'GROQ_UNAVAILABLE') return sendUnavailableError(res, err.retryAfter);
     console.error('Analyze error:', err);
+    // Error fallback — still not 7
     res.json({
-      score: 7, confidence: 'Medium', pacing: 'Normal',
-      tags: ['Good Effort'], tip: 'Keep practicing!',
+      score: 5,
+      confidence: 'Medium',
+      pacing: 'Normal',
+      tags: ['Keep Practicing'],
+      tip: 'Keep practicing!',
       groqStatus: usageTracker.getStatus(),
     });
   }
