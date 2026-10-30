@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useCallback, useEffect } from 'react';
+import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
 import axios from 'axios';
 
 const GroqStatusContext = createContext();
@@ -7,50 +7,44 @@ export const GroqStatusProvider = ({ children }) => {
   const [groqStatus, setGroqStatus] = useState(null);
   const [showWarning, setShowWarning] = useState(false);
   const [showBlocked, setShowBlocked] = useState(false);
+  const [dismissed, setDismissed] = useState(false);
 
-  const updateStatus = useCallback((status) => {
-    if (!status) return;
-    setGroqStatus(status);
-    if (status.limitReached) {
-      setShowBlocked(true);
-      setShowWarning(false);
-    } else if (status.nearLimit) {
-      setShowWarning(true);
-      setShowBlocked(false);
-    } else {
-      setShowWarning(false);
-      setShowBlocked(false);
-    }
+  const updateStatus = useCallback((data) => {
+    if (!data) return;
+    setGroqStatus(data);
+    setShowWarning(data.usagePct >= 90 && !dismissed);
+    setShowBlocked(data.limitReached);
+  }, [dismissed]);
+
+  const dismissWarning = useCallback(() => {
+    setDismissed(true);
+    setShowWarning(false);
   }, []);
 
-  // Poll status every 15 seconds
   useEffect(() => {
-  const fetchStatus = async () => {
-    const token = localStorage.getItem('token');
-    if (!token) return; // Don't poll if not logged in
-    try {
-      const res = await axios.get('/api/groq/status');
-      const data = res.data;
-      updateStatus(data);
-      setShowWarning(data.usagePct >= 90 && !dismissed);
-      setShowBlocked(data.limitReached);
-    } catch {
-      // Silent fail
-    }
-  };
+    const fetchStatus = async () => {
+      const token = localStorage.getItem('token');
+      if (!token) return;
+      try {
+        const res = await axios.get('/api/groq/status');
+        updateStatus(res.data);
+      } catch {
+        // Silent fail
+      }
+    };
 
-  fetchStatus();
-  const interval = setInterval(fetchStatus, 15000);
-  return () => clearInterval(interval);
-}, [dismissed]);
+    fetchStatus();
+    const interval = setInterval(fetchStatus, 15000);
+    return () => clearInterval(interval);
+  }, [dismissed, updateStatus]);
 
   return (
     <GroqStatusContext.Provider value={{
       groqStatus,
       showWarning,
       showBlocked,
+      dismissWarning,
       updateStatus,
-      dismissWarning: () => setShowWarning(false),
     }}>
       {children}
     </GroqStatusContext.Provider>
