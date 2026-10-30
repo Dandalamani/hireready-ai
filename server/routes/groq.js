@@ -118,7 +118,7 @@ const groqCall = async (messages, maxTokens = 200, temperature = 0.7) => {
 
   try {
     const completion = await groq.chat.completions.create({
-      model: 'llama3-70b-8192',
+      model: 'llama-3.1-8b-instant',
       messages,
       max_tokens: maxTokens,
       temperature,
