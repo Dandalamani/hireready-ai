@@ -9,7 +9,10 @@ let mysqlPool = null;
 if (isProduction) {
   pgPool = new Pool({
     connectionString: process.env.DATABASE_URL,
-    ssl: { rejectUnauthorized: false },
+    ssl: {
+  rejectUnauthorized: false,
+  sslmode: 'verify-full',
+},
     max: 10,
   });
   console.log('✅ Connected to Neon PostgreSQL');
