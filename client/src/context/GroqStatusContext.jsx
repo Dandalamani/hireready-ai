@@ -25,20 +25,24 @@ export const GroqStatusProvider = ({ children }) => {
 
   // Poll status every 15 seconds
   useEffect(() => {
+  const fetchStatus = async () => {
     const token = localStorage.getItem('token');
-    if (!token) return;
+    if (!token) return; // Don't poll if not logged in
+    try {
+      const res = await axios.get('/api/groq/status');
+      const data = res.data;
+      updateStatus(data);
+      setShowWarning(data.usagePct >= 90 && !dismissed);
+      setShowBlocked(data.limitReached);
+    } catch {
+      // Silent fail
+    }
+  };
 
-    const poll = async () => {
-      try {
-        const res = await axios.get('/api/groq/status');
-        updateStatus(res.data);
-      } catch {}
-    };
-
-    poll();
-    const interval = setInterval(poll, 15000);
-    return () => clearInterval(interval);
-  }, [updateStatus]);
+  fetchStatus();
+  const interval = setInterval(fetchStatus, 15000);
+  return () => clearInterval(interval);
+}, [dismissed]);
 
   return (
     <GroqStatusContext.Provider value={{
