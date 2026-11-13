@@ -141,7 +141,7 @@ const handleStartInterview = () => {
             {/* URL Input */}
             <div className="bg-white rounded-2xl p-6 border border-slate-100 shadow-sm">
               <label className="block text-sm font-semibold text-slate-700 mb-3">
-                GitHub Repository or Profile URL
+                GitHub Repository URL 
               </label>
               <div className="flex gap-3">
                 <div className="flex-1 flex items-center gap-3 border border-slate-200 rounded-xl px-4 py-3 focus-within:ring-2 focus-within:ring-blue-500 focus-within:border-transparent transition bg-white">

@@ -17,15 +17,22 @@ const parseGitHubUrl = (url) => {
 };
 
 const githubFetch = async (url) => {
-  const headers = {
+  const baseHeaders = {
     'User-Agent': 'HireReady-AI-App',
     'Accept': 'application/vnd.github.v3+json',
   };
-  if (process.env.GITHUB_TOKEN) {
-    headers['Authorization'] = `token ${process.env.GITHUB_TOKEN}`;
+
+  const token = process.env.GITHUB_TOKEN?.trim();
+
+  if (token) {
+    const res = await fetch(url, {
+      headers: { ...baseHeaders, Authorization: `Bearer ${token}` },
+    });
+    if (res.status !== 401) return res;
+    console.warn('⚠️ GITHUB_TOKEN rejected (401). Retrying without token.');
   }
-  const res = await fetch(url, { headers });
-  return res;
+
+  return fetch(url, { headers: baseHeaders });
 };
 
 const fetchRepoData = async (owner, repo) => {
