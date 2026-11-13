@@ -24,7 +24,7 @@ const usageTracker = {
   windowStart: Date.now(),
   limitReached: false,
   limitType: null,
-  TOKEN_LIMIT: 6000,
+  TOKEN_LIMIT: 8000,
   REQUEST_LIMIT: 30,
   WARN_THRESHOLD: 0.9,
 
@@ -108,6 +108,9 @@ const safeParseJSON = (raw) => {
 };
 
 // ── Groq call helper ──
+const GROQ_MODEL = process.env.GROQ_MODEL || 'openai/gpt-oss-120b';
+const isGptOss = GROQ_MODEL.startsWith('openai/gpt-oss');
+
 const groqCall = async (messages, maxTokens = 200, temperature = 0.7) => {
   if (usageTracker.isAtLimit()) {
     const err = new Error('GROQ_LIMIT_REACHED');
@@ -118,13 +121,18 @@ const groqCall = async (messages, maxTokens = 200, temperature = 0.7) => {
 
   try {
     const completion = await groq.chat.completions.create({
-      model: 'llama-3.3-70b-versatile',
+      model: GROQ_MODEL,
       messages,
-      max_tokens: maxTokens,
       temperature,
+      // reasoning models spend tokens on "thinking", so give extra room
+      max_completion_tokens: isGptOss ? maxTokens + 400 : maxTokens,
+      ...(isGptOss ? { reasoning_effort: 'low' } : {}),
     });
-    const usage = completion.usage;
-    usageTracker.addUsage(usage?.total_tokens || maxTokens * 0.5);
+
+    const text = completion.choices?.[0]?.message?.content?.trim();
+    if (!text) throw new Error('EMPTY_COMPLETION');
+
+    usageTracker.addUsage(completion.usage?.total_tokens || maxTokens * 0.5);
     return completion;
   } catch (err) {
     if (err.status === 429 ||
@@ -301,7 +309,6 @@ Score must reflect actual answer quality — 0 for no answer, 1-3 for very poor,
     }
   } catch (err) {
     if (err.message === 'GROQ_LIMIT_REACHED') return sendLimitError(res, err.groqStatus);
-    if (err.message === 'GROQ_UNAVAILABLE') return sendUnavailableError(res, err.retryAfter);
     console.error('Analyze error:', err);
     // Error fallback — still not 7
     res.json({
@@ -356,8 +363,8 @@ router.post('/report', protect, async (req, res) => {
 
   try {
     const summary = answeredExchanges
-      .map((e, i) => `Q${i + 1}: ${e.question || 'N/A'}\nAnswer: ${e.answer || 'No answer given'}`)
-      .join('\n\n');
+  .map((e, i) => `Q${i + 1}: ${(e.question || 'N/A').slice(0, 200)}\nA: ${(e.answer || '').slice(0, 400)}`)
+  .join('\n\n');
 
     const completion = await groqCall([
       {

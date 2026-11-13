@@ -144,9 +144,9 @@ useEffect(() => {
 }, []); // eslint-disable-line
 
   if (loading) return (
-    <div className="flex min-h-screen bg-slate-50">
+    <div className="flex h-screen bg-slate-50 overflow-hidden">
       <Sidebar />
-      <main className="ml-56 flex-1 flex items-center justify-center flex-col gap-4">
+        <main className="ml-56 flex-1 flex items-center justify-center flex-col gap-4">
         <div className="w-12 h-12 border-4 border-blue-600 border-t-transparent rounded-full animate-spin" />
         <p className="text-slate-600 font-semibold text-lg">Generating your report...</p>
         <p className="text-slate-400 text-sm">Coach Roberts is analyzing your session</p>
@@ -155,9 +155,9 @@ useEffect(() => {
   );
 
   return (
-    <div className="flex min-h-screen bg-slate-50">
+    <div className="flex h-screen bg-slate-50 overflow-hidden">
       <Sidebar />
-      <main className="ml-56 flex-1 p-8">
+        <main className="ml-56 flex-1 p-8 overflow-y-auto h-screen">
 
         {/* Header */}
         <div className="flex items-center justify-between mb-6">

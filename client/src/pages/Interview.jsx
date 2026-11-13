@@ -198,29 +198,36 @@ const Interview = () => {
     return recognition;
   }, []);
 
-  const startListening = useCallback(() => {
-    if (micPermission === 'denied') return;
-    try {
-      if (recognitionRef.current) {
-        try { recognitionRef.current.abort(); } catch {}
-      }
-      recognitionRef.current = setupRecognition();
-      if (recognitionRef.current) {
-        recognitionRef.current.start();
-        setIsListening(true);
-        console.log('🎤 Starting mic');
-      }
-    } catch (e) {
-      console.error('Start listening error:', e);
+const startListening = useCallback(() => {
+  if (micPermission === 'denied') return;
+  try {
+    // Detach the old recognizer so its onend can't restart it
+    const old = recognitionRef.current;
+    if (old) {
+      old.onend = null;
+      old.onresult = null;
+      old.onerror = null;
+      try { old.abort(); } catch {}
     }
-  }, [setupRecognition, micPermission]);
+    const rec = setupRecognition();
+    recognitionRef.current = rec;
+    if (rec) {
+      rec.start();
+      setIsListening(true);
+    }
+  } catch (e) {
+    console.error('Start listening error:', e);
+  }
+}, [setupRecognition, micPermission]);
 
-  const stopListening = useCallback(() => {
-    try {
-      recognitionRef.current?.stop();
-    } catch {}
-    setIsListening(false);
-  }, []);
+const stopListening = useCallback(() => {
+  const rec = recognitionRef.current;
+  if (rec) {
+    rec.onend = null; // prevent auto-restart
+    try { rec.stop(); } catch {}
+  }
+  setIsListening(false);
+}, []);
 
   // ── Analyze and next ──
   const analyzeAndNext = useCallback(async (answerText) => {
@@ -445,15 +452,19 @@ const Interview = () => {
     };
   }, []); // eslint-disable-line
 
-  const handleMicButton = () => {
-    if (showBlocked) return;
-    if (phase === 'listening' || isListening) {
-      analyzeAndNext(transcriptRef.current);
-    } else if (phase === 'thinking') {
-      clearInterval(countdownRef.current);
-      setPhase('listening');
+const handleMicButton = () => {
+  if (showBlocked) return;
+  if (phase === 'listening' || isListening) {
+    if (transcriptRef.current.trim().length < 3) {
+      setError("I didn't catch anything yet. Keep speaking, then tap to submit.");
+      return;
     }
-  };
+    analyzeAndNext(transcriptRef.current);
+  } else if (phase === 'thinking') {
+    clearInterval(countdownRef.current);
+    setPhase('listening');
+  }
+};
 
   const handleEndSession = async () => {
     window.speechSynthesis.cancel();

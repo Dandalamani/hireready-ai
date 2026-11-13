@@ -88,7 +88,7 @@ router.post('/analyze', protect, async (req, res) => {
     const repoData = await fetchRepoData(parsed.owner, parsed.repo);
 
     const completion = await groq.chat.completions.create({
-      model: 'llama-3.3-70b-versatile',
+      model: process.env.GROQ_MODEL || 'openai/gpt-oss-120b',
       messages: [
         {
           role: 'system',
@@ -112,7 +112,8 @@ Difficulty: ${difficulty || 'Intermediate'}
 Generate 5 specific interview questions about this repository.`,
         },
       ],
-      max_tokens: 800,
+      max_completion_tokens: 1800,
+      reasoning_effort: 'low',
       temperature: 0.7,
     });
 
